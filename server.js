@@ -78,11 +78,11 @@ export class MemoryStore {
 }
 
 export class SupabaseStore {
-  constructor(url, serviceKey) {
+  constructor(url, publishableKey) {
     this.baseUrl = `${url.replace(/\/$/, "")}/rest/v1/messages`;
     this.headers = {
-      apikey: serviceKey,
-      authorization: `Bearer ${serviceKey}`,
+      apikey: publishableKey,
+      authorization: `Bearer ${publishableKey}`,
       "content-type": "application/json",
     };
   }
@@ -261,11 +261,11 @@ export function createChatServer({ store, pollMs = POLL_MS, logger = console } =
 
 function storeFromEnvironment() {
   if (process.env.CHAT_STORE === "memory") return new MemoryStore();
-  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.");
+  const { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } = process.env;
+  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+    throw new Error("SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY are required.");
   }
-  return new SupabaseStore(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  return new SupabaseStore(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
