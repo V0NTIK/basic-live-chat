@@ -1,0 +1,14 @@
+{
+  "name": "basic-live-chat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A single-file browser chat client backed by a Render API and Supabase.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}
