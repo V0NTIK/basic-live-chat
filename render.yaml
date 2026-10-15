@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: basic-live-chat-api
+    runtime: node
+    plan: free
+    region: ohio
+    buildCommand: ""
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
