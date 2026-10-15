@@ -50,7 +50,7 @@
     </form>
   </dialog>
   <script>
-    const DEFAULT_SERVER_URL = "https://YOUR-SERVICE.onrender.com";
+    const DEFAULT_SERVER_URL = "https://basic-live-chat-api.onrender.com";
     const $ = (id) => document.getElementById(id);
     const state = { source:null, messages:new Map(), clientId:localStorage.chatClientId || crypto.randomUUID() };
     localStorage.chatClientId = state.clientId;
