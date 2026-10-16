@@ -16,6 +16,7 @@
     button,input { font:inherit; }
     button { border:0; border-radius:10px; color:white; cursor:pointer; background:#5065e5; padding:10px 14px; }
     button.secondary { background:#243052; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
     #messages { padding:20px; overflow:auto; display:flex; flex-direction:column; gap:10px; }
     .empty { margin:auto; color:#91a0c7; text-align:center; }
     .msg { max-width:78%; padding:10px 13px; background:#202b4c; border-radius:5px 14px 14px; overflow-wrap:anywhere; }
@@ -25,18 +26,22 @@
     form { display:grid; grid-template-columns:1fr auto; gap:10px; padding:14px; border-top:1px solid #26345e; }
     #message { min-width:0; padding:12px 14px; border-radius:11px; border:1px solid #364777; background:#0d142a; color:white; outline:none; }
     dialog { width:min(520px,calc(100% - 32px)); color:#eef2ff; background:#151e3a; border:1px solid #354773; border-radius:16px; padding:20px; }
+    #auditDialog { width:min(820px,calc(100% - 24px)); }
     dialog::backdrop { background:#050816cc; }
     .settings { display:grid; gap:13px; }
     label { display:grid; gap:6px; color:#cbd5ef; font-size:13px; }
     label input { padding:10px 12px; border:1px solid #354773; background:#0d142a; color:white; border-radius:9px; }
     .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }
+    .audit-actions { display:flex; flex-wrap:wrap; gap:8px; }
+    #auditProgress { color:#b8c2e2; font-size:13px; min-height:20px; }
+    #auditReport { width:100%; min-height:50vh; resize:vertical; padding:12px; border:1px solid #354773; border-radius:9px; background:#080d1c; color:#dbe6ff; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; }
     #notice { color:#fca5a5; min-height:20px; padding:0 14px; font-size:13px; }
     @media (max-width:520px) { .app { height:calc(100vh - 20px); } body { padding:10px; } .msg { max-width:90%; } }
   </style>
 </head>
 <body>
   <main class="app">
-    <header><span id="dot" class="dot"></span><h1 id="title">Basic Live Chat</h1><button id="settingsButton" class="secondary" type="button">Settings</button></header>
+    <header><span id="dot" class="dot"></span><h1 id="title">Basic Live Chat</h1><button id="auditButton" class="secondary" type="button">Audit</button><button id="settingsButton" class="secondary" type="button">Settings</button></header>
     <section id="messages" aria-live="polite"><p class="empty">Connect to begin chatting.</p></section>
     <section><div id="notice" role="status"></div><form id="chatForm"><input id="message" maxlength="1000" autocomplete="off" placeholder="Write a message…" disabled><button id="send" disabled>Send</button></form></section>
   </main>
@@ -49,11 +54,23 @@
       <div class="actions"><button id="cancelSettings" class="secondary" type="button">Cancel</button><button value="save">Connect</button></div>
     </form>
   </dialog>
+  <dialog id="auditDialog">
+    <section class="settings">
+      <h2 style="margin:0">Connection Audit</h2>
+      <p style="margin:0;color:#b8c2e2">Runs read-only network checks plus a harmless echo request. It does not send a chat message or collect passwords, cookies, files, browsing history, or your IP address.</p>
+      <div class="audit-actions"><button id="runAudit" type="button">Run full audit</button><button id="copyAudit" class="secondary" type="button" disabled>Copy report</button><button id="closeAudit" class="secondary" type="button">Close</button></div>
+      <div id="auditProgress" role="status">Ready.</div>
+      <textarea id="auditReport" readonly spellcheck="false" aria-label="Connection audit report"></textarea>
+    </section>
+  </dialog>
   <script>
     const DEFAULT_SERVER_URL = "https://basic-live-chat-api.onrender.com";
     const $ = (id) => document.getElementById(id);
-    const state = { source:null, messages:new Map(), clientId:localStorage.chatClientId || crypto.randomUUID() };
-    localStorage.chatClientId = state.clientId;
+    const makeId = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let storedClientId = "";
+    try { storedClientId = localStorage.chatClientId || ""; } catch {}
+    const state = { source:null, pollTimer:null, sseTimer:null, messages:new Map(), clientId:storedClientId || makeId() };
+    try { localStorage.chatClientId = state.clientId; } catch {}
 
     function config() {
       return {
@@ -64,6 +81,12 @@
     }
     function setStatus(live, text="") { $("dot").classList.toggle("live", live); $("notice").textContent = text; }
     function escapeText(value) { const node=document.createElement("div"); node.textContent=value; return node.innerHTML; }
+    function enableChat() { $("message").disabled=false; $("send").disabled=false; }
+    function stopRealtime() {
+      state.source?.close(); state.source=null;
+      clearTimeout(state.sseTimer); state.sseTimer=null;
+      clearInterval(state.pollTimer); state.pollTimer=null;
+    }
     function renderMessage(item) {
       if (state.messages.has(item.id)) return;
       state.messages.set(item.id,item);
@@ -74,33 +97,143 @@
       el.innerHTML=`<div class="meta">${escapeText(item.display_name)} · ${time}</div><div class="text">${escapeText(item.body)}</div>`;
       $("messages").append(el); $("messages").scrollTop=$("messages").scrollHeight;
     }
+    async function loadMessages(c, quiet=false) {
+      const response=await fetch(`${c.serverUrl}/api/messages?room=${encodeURIComponent(c.room)}&_=${Date.now()}`, {cache:"no-store"});
+      if (!response.ok) {
+        const text=await response.text();
+        let detail=`HTTP ${response.status}`;
+        try { detail=JSON.parse(text).error||detail; } catch { if(text) detail+=`: ${text.slice(0,160)}`; }
+        throw new Error(detail);
+      }
+      const data=await response.json(); data.messages.forEach(renderMessage);
+      if (!quiet && !data.messages.length) $("messages").innerHTML='<p class="empty">No messages yet. Say hello.</p>';
+      return data;
+    }
+    function startPolling(c, reason="Streaming unavailable") {
+      state.source?.close(); state.source=null; clearTimeout(state.sseTimer);
+      if (!state.pollTimer) state.pollTimer=setInterval(()=>loadMessages(c,true).catch(error=>setStatus(false,`Polling failed: ${error.message}`)),3000);
+      setStatus(true,`${reason}; connected in compatibility mode.`); enableChat();
+    }
     async function connect() {
       const c=config();
       if (!c.displayName || c.serverUrl.includes("YOUR-SERVICE")) return openSettings();
-      state.source?.close(); state.messages.clear(); $("messages").innerHTML='<p class="empty">Loading messages…</p>';
+      stopRealtime(); state.messages.clear(); $("messages").innerHTML='<p class="empty">Loading messages…</p>';
       $("title").textContent=`#${c.room}`; setStatus(false,"Connecting…");
       try {
-        const response=await fetch(`${c.serverUrl}/api/messages?room=${encodeURIComponent(c.room)}`);
-        if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
-        const data=await response.json(); data.messages.forEach(renderMessage);
-        if (!data.messages.length) $("messages").innerHTML='<p class="empty">No messages yet. Say hello.</p>';
+        await loadMessages(c);
         state.source=new EventSource(`${c.serverUrl}/api/events?room=${encodeURIComponent(c.room)}`);
-        state.source.addEventListener("ready",()=>{ setStatus(true,""); $("message").disabled=false; $("send").disabled=false; $("message").focus(); });
+        state.sseTimer=setTimeout(()=>startPolling(c,"Live stream timed out"),7000);
+        state.source.addEventListener("ready",()=>{ clearTimeout(state.sseTimer); setStatus(true,""); enableChat(); $("message").focus(); });
         state.source.addEventListener("message",(event)=>renderMessage(JSON.parse(event.data)));
-        state.source.onerror=()=>setStatus(false,"Connection interrupted; retrying…");
+        state.source.onerror=()=>startPolling(c,"Live stream blocked or interrupted");
       } catch (error) { setStatus(false,`Could not connect: ${error.message}`); $("message").disabled=true; $("send").disabled=true; }
     }
     function openSettings() { const c=config(); $("serverUrl").value=c.serverUrl; $("room").value=c.room; $("displayName").value=c.displayName; $("settingsDialog").showModal(); }
     $("settingsButton").addEventListener("click",openSettings);
     $("cancelSettings").addEventListener("click",()=>$("settingsDialog").close());
     $("settingsForm").addEventListener("submit",()=>{ localStorage.chatServerUrl=$("serverUrl").value.trim(); localStorage.chatRoom=$("room").value.trim(); localStorage.chatDisplayName=$("displayName").value.trim(); setTimeout(connect); });
+    async function sendMessage(c, payload) {
+      const body=JSON.stringify(payload);
+      try {
+        return await fetch(`${c.serverUrl}/api/messages`,{method:"POST",headers:{"content-type":"application/json"},body});
+      } catch (preflightError) {
+        try {
+          return await fetch(`${c.serverUrl}/api/messages`,{method:"POST",headers:{"content-type":"text/plain;charset=UTF-8"},body});
+        } catch (simpleError) {
+          throw new Error(`JSON/preflight request: ${preflightError.message}; simple request: ${simpleError.message}`);
+        }
+      }
+    }
     $("chatForm").addEventListener("submit",async(event)=>{
       event.preventDefault(); const c=config(); const body=$("message").value.trim(); if(!body)return;
       $("send").disabled=true;
-      try { const response=await fetch(`${c.serverUrl}/api/messages`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({room:c.room,displayName:c.displayName,body,clientId:state.clientId})}); const data=await response.json(); if(!response.ok)throw new Error(data.error||`HTTP ${response.status}`); renderMessage(data.message); $("message").value=""; setStatus(true,""); }
+      try { const response=await sendMessage(c,{room:c.room,displayName:c.displayName,body,clientId:state.clientId}); const text=await response.text(); let data={}; try{data=JSON.parse(text)}catch{} if(!response.ok)throw new Error(data.error||`HTTP ${response.status}${text?`: ${text.slice(0,160)}`:""}`); renderMessage(data.message); $("message").value=""; setStatus(true,state.pollTimer?"Connected in compatibility mode.":""); }
       catch(error){ setStatus(false,`Message failed: ${error.message}`); }
       finally { $("send").disabled=false; $("message").focus(); }
     });
+
+    function safeValue(read) { try { return read(); } catch (error) { return `unavailable: ${error.name}: ${error.message}`; } }
+    function timeoutSignal(ms) {
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(new DOMException("Timed out","TimeoutError")),ms);
+      return {signal:controller.signal,clear:()=>clearTimeout(timer)};
+    }
+    async function fetchAudit(name,url,options={}) {
+      const started=performance.now(); const timeout=timeoutSignal(options.timeoutMs||10000);
+      try {
+        const response=await fetch(url,{...options,timeoutMs:undefined,signal:timeout.signal,cache:"no-store"});
+        const headers={};
+        for(const key of ["content-type","x-chat-origin","x-chat-request-id","server-timing","via","server"]){const value=response.headers.get(key);if(value)headers[key]=value;}
+        let body="";
+        try { body=(await response.text()).slice(0,1200); } catch(error) { body=`<unreadable: ${error.name}: ${error.message}>`; }
+        let parsed=null; try{parsed=JSON.parse(body)}catch{}
+        return {name,ok:response.ok,status:response.status,statusText:response.statusText,type:response.type,redirected:response.redirected,finalUrl:response.url,durationMs:Math.round(performance.now()-started),headers,originMarker:headers["x-chat-origin"]||parsed?.marker||null,requestId:headers["x-chat-request-id"]||parsed?.requestId||null,body};
+      } catch(error) {
+        return {name,ok:false,networkError:true,errorName:error.name,errorMessage:error.message,durationMs:Math.round(performance.now()-started)};
+      } finally { timeout.clear(); }
+    }
+    async function imageAudit(url) {
+      const started=performance.now();
+      return await new Promise(resolve=>{
+        const image=new Image(); const done=(result)=>{clearTimeout(timer);image.onload=null;image.onerror=null;resolve({name:"image-resource",durationMs:Math.round(performance.now()-started),...result});};
+        const timer=setTimeout(()=>done({ok:false,errorMessage:"Timed out after 10 seconds"}),10000);
+        image.onload=()=>done({ok:true,width:image.naturalWidth,height:image.naturalHeight});
+        image.onerror=()=>done({ok:false,errorMessage:"Image load event reported an error"});
+        image.src=url;
+      });
+    }
+    async function sseAudit(url) {
+      const started=performance.now();
+      return await new Promise(resolve=>{
+        let settled=false; const source=new EventSource(url);
+        const done=(result)=>{if(settled)return;settled=true;clearTimeout(timer);source.close();resolve({name:"server-sent-events",durationMs:Math.round(performance.now()-started),...result});};
+        const timer=setTimeout(()=>done({ok:false,errorMessage:"No ready event within 10 seconds"}),10000);
+        source.addEventListener("ready",event=>{let data=null;try{data=JSON.parse(event.data)}catch{}done({ok:true,data});});
+        source.onerror=()=>done({ok:false,errorMessage:"EventSource error before ready event"});
+      });
+    }
+    function classify(results) {
+      const get=name=>results.find(item=>item.name===name)||{};
+      const health=get("cors-health"); const noCors=get("no-cors-health"); const history=get("message-history");
+      const preflight=get("json-preflight-echo"); const simple=get("simple-text-echo"); const pixel=get("image-resource"); const sse=get("server-sent-events");
+      const findings=[];
+      if(health.status===403&&!health.originMarker) findings.push("A 403 was returned without the application's origin marker. An upstream school proxy/filter almost certainly generated it before Render.");
+      if(health.ok&&health.originMarker) findings.push("The request reached the genuine Render application.");
+      if(!health.ok&&(noCors.ok||noCors.type==="opaque")) findings.push("The endpoint is reachable in no-CORS mode but normal fetch is blocked, indicating a CORS or browser-policy interception.");
+      if(pixel.ok&&!health.ok) findings.push("Passive image loading works while Fetch fails, indicating a browser/API policy rather than DNS failure.");
+      if(health.ok&&!history.ok) findings.push("The base server is reachable but the /api/messages path is blocked or failing.");
+      if(!preflight.ok&&simple.ok) findings.push("JSON POST/preflight is blocked while a safelisted text POST works. The client compatibility fallback should restore message sending.");
+      if(history.ok&&!sse.ok) findings.push("REST works but Server-Sent Events are blocked. The client will automatically use polling compatibility mode.");
+      if(!health.ok&&!noCors.ok&&!pixel.ok) findings.push("All tests to the Render hostname failed. Likely causes are domain/category filtering, DNS blocking, TLS interception, or endpoint security before Render.");
+      if(!findings.length) findings.push("No single boundary was conclusive; compare individual status codes, response snippets, and request IDs.");
+      findings.push("A report containing x-chat-origin=basic-live-chat-api or marker=basic-live-chat-origin-v2 proves that request reached this application; their absence on a 403 points upstream.");
+      return findings;
+    }
+    async function runAudit() {
+      const c=config(); const token=`audit-${Date.now()}-${Math.random().toString(16).slice(2,8)}`; const base=c.serverUrl.replace(/\/$/,"");
+      $("runAudit").disabled=true; $("copyAudit").disabled=true; $("auditReport").value="";
+      const environment={timestamp:new Date().toISOString(),pageUrl:location.href,pageProtocol:location.protocol,pageOrigin:location.origin,serverUrl:base,online:navigator.onLine,secureContext:isSecureContext,userAgent:navigator.userAgent,platform:navigator.platform,languages:navigator.languages,timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,cookieEnabled:navigator.cookieEnabled,fetchSupported:typeof fetch==="function",eventSourceSupported:typeof EventSource==="function",abortControllerSupported:typeof AbortController==="function",localStorage:safeValue(()=>{const key="chatAuditTest";localStorage.setItem(key,"1");localStorage.removeItem(key);return"read/write ok";}),network:safeValue(()=>navigator.connection?{effectiveType:navigator.connection.effectiveType,downlink:navigator.connection.downlink,rtt:navigator.connection.rtt,saveData:navigator.connection.saveData}:"not exposed")};
+      const tests=[];
+      const step=async(label,work)=>{$("auditProgress").textContent=`Running ${label}…`;const result=await work();tests.push(result);$("auditReport").value=JSON.stringify({reportVersion:2,environment,tests,findings:classify(tests)},null,2);};
+      try {
+        await step("CORS health GET",()=>fetchAudit("cors-health",`${base}/health?token=${token}`));
+        await step("no-CORS reachability",()=>fetchAudit("no-cors-health",`${base}/health?token=${token}-opaque`,{mode:"no-cors"}));
+        await step("diagnostic origin ping",()=>fetchAudit("diagnostic-ping",`${base}/api/diagnostics/ping?token=${token}`));
+        await step("message history/database path",()=>fetchAudit("message-history",`${base}/api/messages?room=connection-audit&_=${Date.now()}`));
+        await step("JSON POST and OPTIONS preflight",()=>fetchAudit("json-preflight-echo",`${base}/api/diagnostics/echo`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({token})}));
+        await step("safelisted text POST",()=>fetchAudit("simple-text-echo",`${base}/api/diagnostics/echo`,{method:"POST",headers:{"content-type":"text/plain;charset=UTF-8"},body:token}));
+        await step("passive image resource",()=>imageAudit(`${base}/api/diagnostics/pixel.gif?token=${token}`));
+        if(typeof EventSource==="function") await step("Server-Sent Events",()=>sseAudit(`${base}/api/events?room=connection-audit&token=${token}`));
+        else tests.push({name:"server-sent-events",ok:false,errorMessage:"EventSource API is unavailable"});
+        const report={reportVersion:2,auditToken:token,environment,tests,findings:classify(tests),interpretationNote:"Share this report as text. It intentionally excludes passwords, cookies, files, browsing history, and IP addresses."};
+        $("auditReport").value=JSON.stringify(report,null,2); $("auditProgress").textContent="Audit complete. Copy the report and send it back for analysis."; $("copyAudit").disabled=false;
+      } catch(error) { $("auditProgress").textContent=`Audit stopped unexpectedly: ${error.name}: ${error.message}`; }
+      finally { $("runAudit").disabled=false; }
+    }
+    $("auditButton").addEventListener("click",()=>$("auditDialog").showModal());
+    $("closeAudit").addEventListener("click",()=>$("auditDialog").close());
+    $("runAudit").addEventListener("click",runAudit);
+    $("copyAudit").addEventListener("click",async()=>{const report=$("auditReport");let copied=false;try{await navigator.clipboard.writeText(report.value);copied=true;}catch{}if(!copied){report.focus();report.select();copied=document.execCommand("copy");}$("auditProgress").textContent=copied?"Report copied.":"Copy was blocked. Select all text in the report and copy it manually.";});
     connect();
   </script>
 </body>
