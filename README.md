@@ -5,6 +5,7 @@ A deliberately small live-chat system with:
 - `chat.html`: a single-file client that can be opened directly in any modern browser.
 - `server.js`: a Render-ready Node HTTP API with REST, Server-Sent Events, validation, CORS, and basic rate limiting.
 - Supabase Postgres: durable shared message storage protected by row-level security. Its publishable key stays on Render and is not embedded in the HTML client.
+- Built-in connection audit: replaces basic DevTools visibility on locked-down devices and produces a copyable JSON report.
 
 ## Architecture
 
@@ -32,6 +33,21 @@ npm test
 2. Create a Render web service from this repository (or apply `render.yaml`).
 3. Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in Render.
 4. Put the Render service URL into `DEFAULT_SERVER_URL` in `chat.html`.
+
+## Connection audit and compatibility mode
+
+Open `chat.html`, select **Audit**, then **Run full audit**. The report tests:
+
+- normal CORS and no-CORS reachability;
+- an application-origin marker and request ID;
+- the database-backed history path;
+- JSON POST with browser preflight versus a safelisted text POST;
+- passive image loading; and
+- Server-Sent Events.
+
+The audit does not send a chat message and does not collect passwords, cookies, files, browsing history, or IP addresses. If streaming is blocked but REST works, chat automatically falls back to three-second polling. If JSON preflight is blocked, message sending retries with a safelisted `text/plain` request.
+
+A `403` report without `x-chat-origin: basic-live-chat-api` or the `basic-live-chat-origin-v2` marker indicates that an upstream proxy or security product responded before the request reached this application. Resolve policy-based blocking through the network administrator or an approved hostname rather than attempting to evade the control.
 
 ## Limits
 
