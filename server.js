@@ -24,16 +24,19 @@ function json(res, status, body, extraHeaders = {}) {
   res.end(payload);
 }
 
-function corsHeaders() {
+function corsHeaders(requestId) {
   return {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "content-type",
+    "access-control-expose-headers": "content-type,x-chat-origin,x-chat-request-id,server-timing",
     "access-control-max-age": "86400",
+    "x-chat-origin": "basic-live-chat-api",
+    ...(requestId ? { "x-chat-request-id": requestId } : {}),
   };
 }
 
-async function readJson(req, limit = 16_384) {
+async function readText(req, limit = 16_384) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
@@ -45,8 +48,12 @@ async function readJson(req, limit = 16_384) {
     }
     chunks.push(chunk);
   }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readJson(req, limit = 16_384) {
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    return JSON.parse((await readText(req, limit)) || "{}");
   } catch {
     const error = new Error("Request body must be valid JSON.");
     error.status = 400;
@@ -190,7 +197,9 @@ export function createChatServer({ store, pollMs = POLL_MS, logger = console } =
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
-    const headers = corsHeaders();
+    const requestId = randomUUID();
+    const startedAt = performance.now();
+    const headers = corsHeaders(requestId);
 
     if (req.method === "OPTIONS") {
       res.writeHead(204, headers);
@@ -198,8 +207,65 @@ export function createChatServer({ store, pollMs = POLL_MS, logger = console } =
     }
 
     try {
-      if (req.method === "GET" && url.pathname === "/health") {
-        return json(res, 200, { ok: true, service: "basic-live-chat" }, headers);
+      if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/health") {
+        const healthHeaders = { ...headers, "server-timing": `app;dur=${(performance.now() - startedAt).toFixed(1)}` };
+        if (req.method === "HEAD") {
+          res.writeHead(204, healthHeaders);
+          return res.end();
+        }
+        return json(res, 200, { ok: true, service: "basic-live-chat", marker: "origin-v2", requestId }, healthHeaders);
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/diagnostics/ping") {
+        const token = cleanText(url.searchParams.get("token"), 80);
+        logger.log?.("Diagnostic ping", { requestId, token });
+        return json(res, 200, {
+          ok: true,
+          marker: "basic-live-chat-origin-v2",
+          requestId,
+          token,
+          serverTime: new Date().toISOString(),
+          deployment: {
+            service: process.env.RENDER_SERVICE_NAME || "local",
+            serviceId: process.env.RENDER_SERVICE_ID || null,
+            instanceId: process.env.RENDER_INSTANCE_ID || null,
+            commit: process.env.RENDER_GIT_COMMIT || null,
+            region: process.env.RENDER_REGION || null,
+          },
+          received: {
+            method: req.method,
+            origin: cleanText(req.headers.origin, 200) || null,
+            forwardedProto: cleanText(req.headers["x-forwarded-proto"], 20) || null,
+            contentType: cleanText(req.headers["content-type"], 100) || null,
+          },
+        }, { ...headers, "server-timing": `app;dur=${(performance.now() - startedAt).toFixed(1)}` });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/diagnostics/echo") {
+        const raw = await readText(req);
+        let token = "";
+        try { token = cleanText(JSON.parse(raw || "{}").token, 80); } catch { token = cleanText(raw, 80); }
+        logger.log?.("Diagnostic echo", { requestId, token, contentType: req.headers["content-type"] || null });
+        return json(res, 200, {
+          ok: true,
+          marker: "basic-live-chat-origin-v2",
+          requestId,
+          token,
+          receivedBytes: Buffer.byteLength(raw),
+          receivedContentType: req.headers["content-type"] || null,
+          serverTime: new Date().toISOString(),
+        }, { ...headers, "server-timing": `app;dur=${(performance.now() - startedAt).toFixed(1)}` });
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/diagnostics/pixel.gif") {
+        const pixel = Buffer.from("R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=", "base64");
+        res.writeHead(200, {
+          ...headers,
+          "content-type": "image/gif",
+          "content-length": pixel.length,
+          "cache-control": "no-store",
+        });
+        return res.end(pixel);
       }
 
       if (req.method === "GET" && url.pathname === "/api/messages") {
