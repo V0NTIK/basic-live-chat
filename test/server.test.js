@@ -16,7 +16,11 @@ after(() => new Promise((resolve) => server.close(resolve)));
 test("health endpoint responds", async () => {
   const response = await fetch(`${baseUrl}/health`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { ok: true, service: "basic-live-chat" });
+  const data = await response.json();
+  assert.equal(data.ok, true);
+  assert.equal(data.service, "basic-live-chat");
+  assert.equal(data.marker, "origin-v2");
+  assert.ok(data.requestId);
 });
 
 test("messages can be posted and listed", async () => {
@@ -46,4 +50,51 @@ test("invalid rooms and empty messages are rejected", async () => {
     body: JSON.stringify({ room: "lobby", displayName: "Tester", body: "" }),
   });
   assert.equal(empty.status, 400);
+});
+
+test("diagnostic endpoints prove origin and echo both POST formats", async () => {
+  const ping = await fetch(`${baseUrl}/api/diagnostics/ping?token=test-token`, {
+    headers: { origin: "null" },
+  });
+  assert.equal(ping.status, 200);
+  assert.equal(ping.headers.get("x-chat-origin"), "basic-live-chat-api");
+  assert.ok(ping.headers.get("x-chat-request-id"));
+  const pingData = await ping.json();
+  assert.equal(pingData.marker, "basic-live-chat-origin-v2");
+  assert.equal(pingData.token, "test-token");
+  assert.equal(pingData.received.origin, "null");
+
+  for (const [contentType, body] of [
+    ["application/json", JSON.stringify({ token: "json-token" })],
+    ["text/plain;charset=UTF-8", "text-token"],
+  ]) {
+    const response = await fetch(`${baseUrl}/api/diagnostics/echo`, {
+      method: "POST",
+      headers: { "content-type": contentType },
+      body,
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.ok, true);
+    assert.match(data.token, /^(json|text)-token$/);
+  }
+});
+
+test("CORS preflight and passive pixel diagnostics work", async () => {
+  const preflight = await fetch(`${baseUrl}/api/diagnostics/echo`, {
+    method: "OPTIONS",
+    headers: {
+      origin: "null",
+      "access-control-request-method": "POST",
+      "access-control-request-headers": "content-type",
+    },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+  assert.match(preflight.headers.get("access-control-expose-headers"), /x-chat-origin/);
+
+  const pixel = await fetch(`${baseUrl}/api/diagnostics/pixel.gif`);
+  assert.equal(pixel.status, 200);
+  assert.equal(pixel.headers.get("content-type"), "image/gif");
+  assert.ok((await pixel.arrayBuffer()).byteLength > 20);
 });
