@@ -1,5 +1,6 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const ROOM_RE = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -7,6 +8,7 @@ const NAME_MAX = 32;
 const MESSAGE_MAX = 1000;
 const PAGE_SIZE = 100;
 const POLL_MS = 1000;
+const CHAT_HTML = readFileSync(new URL("./chat.html", import.meta.url));
 
 function cleanText(value, max) {
   if (typeof value !== "string") return "";
@@ -207,6 +209,19 @@ export function createChatServer({ store, pollMs = POLL_MS, logger = console } =
     }
 
     try {
+      if ((req.method === "GET" || req.method === "HEAD") && (url.pathname === "/" || url.pathname === "/chat")) {
+        const pageHeaders = {
+          "content-type": "text/html; charset=utf-8",
+          "content-length": CHAT_HTML.length,
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
+          ...headers,
+        };
+        res.writeHead(200, pageHeaders);
+        return res.end(req.method === "HEAD" ? undefined : CHAT_HTML);
+      }
+
       if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/health") {
         const healthHeaders = { ...headers, "server-timing": `app;dur=${(performance.now() - startedAt).toFixed(1)}` };
         if (req.method === "HEAD") {

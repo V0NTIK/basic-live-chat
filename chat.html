@@ -64,7 +64,9 @@
     </section>
   </dialog>
   <script>
-    const DEFAULT_SERVER_URL = "https://basic-live-chat-api.onrender.com";
+    const DEFAULT_SERVER_URL = ["http:","https:"].includes(location.protocol)
+      ? location.origin
+      : "https://basic-live-chat-api.onrender.com";
     const $ = (id) => document.getElementById(id);
     const memoryConfig = { serverUrl:DEFAULT_SERVER_URL, room:"lobby", displayName:"" };
     const makeId = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -200,9 +202,11 @@
       const preflight=get("json-preflight-echo"); const simple=get("simple-text-echo"); const pixel=get("image-resource"); const sse=get("server-sent-events");
       const findings=[];
       if(health.status===403&&!health.originMarker) findings.push("A 403 was returned without the application's origin marker. An upstream school proxy/filter almost certainly generated it before Render.");
+      if(health.status===403&&health.originMarker) findings.push("The request reached the genuine Render application, but the successful origin response was replaced downstream with a 403. This is consistent with a managed network or endpoint filter rewriting responses.");
       if(health.ok&&health.originMarker) findings.push("The request reached the genuine Render application.");
       if(!health.ok&&(noCors.ok||noCors.type==="opaque")) findings.push("The endpoint is reachable in no-CORS mode but normal fetch is blocked, indicating a CORS or browser-policy interception.");
-      if(pixel.ok&&!health.ok) findings.push("Passive image loading works while Fetch fails, indicating a browser/API policy rather than DNS failure.");
+      if(pixel.ok&&pixel.width===1&&pixel.height===1&&!health.ok) findings.push("The genuine 1×1 diagnostic image loaded while Fetch failed, indicating a browser/API policy rather than DNS failure.");
+      if(pixel.ok&&(pixel.width!==1||pixel.height!==1)) findings.push(`The diagnostic image was replaced: the application serves 1×1, but the browser received ${pixel.width}×${pixel.height}. This strongly indicates downstream filtering or response rewriting.`);
       if(health.ok&&!history.ok) findings.push("The base server is reachable but the /api/messages path is blocked or failing.");
       if(!preflight.ok&&simple.ok) findings.push("JSON POST/preflight is blocked while a safelisted text POST works. The client compatibility fallback should restore message sending.");
       if(history.ok&&!sse.ok) findings.push("REST works but Server-Sent Events are blocked. The client will automatically use polling compatibility mode.");
@@ -216,7 +220,7 @@
       $("runAudit").disabled=true; $("copyAudit").disabled=true; $("auditReport").value="";
       const environment={timestamp:new Date().toISOString(),pageUrl:location.href,pageProtocol:location.protocol,pageOrigin:location.origin,serverUrl:base,online:navigator.onLine,secureContext:isSecureContext,userAgent:navigator.userAgent,platform:navigator.platform,languages:navigator.languages,timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,cookieEnabled:navigator.cookieEnabled,fetchSupported:typeof fetch==="function",eventSourceSupported:typeof EventSource==="function",abortControllerSupported:typeof AbortController==="function",localStorage:safeValue(()=>{const key="chatAuditTest";localStorage.setItem(key,"1");localStorage.removeItem(key);return"read/write ok";}),network:safeValue(()=>navigator.connection?{effectiveType:navigator.connection.effectiveType,downlink:navigator.connection.downlink,rtt:navigator.connection.rtt,saveData:navigator.connection.saveData}:"not exposed")};
       const tests=[];
-      const step=async(label,work)=>{$("auditProgress").textContent=`Running ${label}…`;const result=await work();tests.push(result);$("auditReport").value=JSON.stringify({reportVersion:2,environment,tests,findings:classify(tests)},null,2);};
+      const step=async(label,work)=>{$("auditProgress").textContent=`Running ${label}…`;const result=await work();tests.push(result);$("auditReport").value=JSON.stringify({reportVersion:3,environment,tests,findings:classify(tests)},null,2);};
       try {
         await step("CORS health GET (allows for a free-service cold start)",()=>fetchAudit("cors-health",`${base}/health?token=${token}`,{timeoutMs:60000}));
         await step("no-CORS reachability",()=>fetchAudit("no-cors-health",`${base}/health?token=${token}-opaque`,{mode:"no-cors",timeoutMs:20000}));
@@ -227,7 +231,7 @@
         await step("passive image resource",()=>imageAudit(`${base}/api/diagnostics/pixel.gif?token=${token}`));
         if(typeof EventSource==="function") await step("Server-Sent Events",()=>sseAudit(`${base}/api/events?room=connection-audit&token=${token}`));
         else tests.push({name:"server-sent-events",ok:false,errorMessage:"EventSource API is unavailable"});
-        const report={reportVersion:2,auditToken:token,environment,tests,findings:classify(tests),interpretationNote:"Share this report as text. It intentionally excludes passwords, cookies, files, browsing history, and IP addresses."};
+        const report={reportVersion:3,auditToken:token,environment,tests,findings:classify(tests),interpretationNote:"Share this report as text. It intentionally excludes passwords, cookies, files, browsing history, and IP addresses."};
         $("auditReport").value=JSON.stringify(report,null,2); $("auditProgress").textContent="Audit complete. Copy the report and send it back for analysis."; $("copyAudit").disabled=false;
       } catch(error) { $("auditProgress").textContent=`Audit stopped unexpectedly: ${error.name}: ${error.message}`; }
       finally { $("runAudit").disabled=false; }

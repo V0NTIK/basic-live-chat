@@ -23,6 +23,15 @@ test("health endpoint responds", async () => {
   assert.ok(data.requestId);
 });
 
+test("hosted chat page is served for same-origin use", async () => {
+  const response = await fetch(`${baseUrl}/`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /^text\/html/);
+  const page = await response.text();
+  assert.match(page, /<title>Basic Live Chat<\/title>/);
+  assert.match(page, /location\.origin/);
+});
+
 test("messages can be posted and listed", async () => {
   const created = await fetch(`${baseUrl}/api/messages`, {
     method: "POST",
