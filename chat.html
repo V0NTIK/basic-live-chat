@@ -66,6 +66,7 @@
   <script>
     const DEFAULT_SERVER_URL = "https://basic-live-chat-api.onrender.com";
     const $ = (id) => document.getElementById(id);
+    const memoryConfig = { serverUrl:DEFAULT_SERVER_URL, room:"lobby", displayName:"" };
     const makeId = () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     let storedClientId = "";
     try { storedClientId = localStorage.chatClientId || ""; } catch {}
@@ -73,10 +74,11 @@
     try { localStorage.chatClientId = state.clientId; } catch {}
 
     function config() {
+      const read=(key,fallback)=>{try{return localStorage[key]||fallback}catch{return fallback}};
       return {
-        serverUrl:(localStorage.chatServerUrl || DEFAULT_SERVER_URL).replace(/\/$/, ""),
-        room:localStorage.chatRoom || "lobby",
-        displayName:localStorage.chatDisplayName || "",
+        serverUrl:read("chatServerUrl",memoryConfig.serverUrl).replace(/\/$/, ""),
+        room:read("chatRoom",memoryConfig.room),
+        displayName:read("chatDisplayName",memoryConfig.displayName),
       };
     }
     function setStatus(live, text="") { $("dot").classList.toggle("live", live); $("notice").textContent = text; }
@@ -131,7 +133,7 @@
     function openSettings() { const c=config(); $("serverUrl").value=c.serverUrl; $("room").value=c.room; $("displayName").value=c.displayName; $("settingsDialog").showModal(); }
     $("settingsButton").addEventListener("click",openSettings);
     $("cancelSettings").addEventListener("click",()=>$("settingsDialog").close());
-    $("settingsForm").addEventListener("submit",()=>{ localStorage.chatServerUrl=$("serverUrl").value.trim(); localStorage.chatRoom=$("room").value.trim(); localStorage.chatDisplayName=$("displayName").value.trim(); setTimeout(connect); });
+    $("settingsForm").addEventListener("submit",()=>{ memoryConfig.serverUrl=$("serverUrl").value.trim(); memoryConfig.room=$("room").value.trim(); memoryConfig.displayName=$("displayName").value.trim(); try{localStorage.chatServerUrl=memoryConfig.serverUrl;localStorage.chatRoom=memoryConfig.room;localStorage.chatDisplayName=memoryConfig.displayName;}catch{} setTimeout(connect); });
     async function sendMessage(c, payload) {
       const body=JSON.stringify(payload);
       try {
@@ -216,9 +218,9 @@
       const tests=[];
       const step=async(label,work)=>{$("auditProgress").textContent=`Running ${label}…`;const result=await work();tests.push(result);$("auditReport").value=JSON.stringify({reportVersion:2,environment,tests,findings:classify(tests)},null,2);};
       try {
-        await step("CORS health GET",()=>fetchAudit("cors-health",`${base}/health?token=${token}`));
-        await step("no-CORS reachability",()=>fetchAudit("no-cors-health",`${base}/health?token=${token}-opaque`,{mode:"no-cors"}));
-        await step("diagnostic origin ping",()=>fetchAudit("diagnostic-ping",`${base}/api/diagnostics/ping?token=${token}`));
+        await step("CORS health GET (allows for a free-service cold start)",()=>fetchAudit("cors-health",`${base}/health?token=${token}`,{timeoutMs:60000}));
+        await step("no-CORS reachability",()=>fetchAudit("no-cors-health",`${base}/health?token=${token}-opaque`,{mode:"no-cors",timeoutMs:20000}));
+        await step("diagnostic origin ping",()=>fetchAudit("diagnostic-ping",`${base}/api/diagnostics/ping?token=${token}`,{timeoutMs:20000}));
         await step("message history/database path",()=>fetchAudit("message-history",`${base}/api/messages?room=connection-audit&_=${Date.now()}`));
         await step("JSON POST and OPTIONS preflight",()=>fetchAudit("json-preflight-echo",`${base}/api/diagnostics/echo`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({token})}));
         await step("safelisted text POST",()=>fetchAudit("simple-text-echo",`${base}/api/diagnostics/echo`,{method:"POST",headers:{"content-type":"text/plain;charset=UTF-8"},body:token}));
